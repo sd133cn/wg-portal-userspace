@@ -1,0 +1,47 @@
+# wg-portal (userspace fork) - offline deployment from prebuilt images
+#
+#   docker load -i wg-portal-userspace-images-v1.0.0.tar        # 或 gunzip 后 load
+#   docker compose -f docker-compose.release.yml up -d
+#
+# 用途：目标机器**不能联网**（拿不到 npm/apt/go 依赖，无法本地 build）时，
+# 直接用 GitHub Release 里附带的镜像 tar 起服务，不需要任何构建步骤。
+#
+# 除镜像来源外，本文件与 docker-compose.yml 完全等价（同样的卷、host 网络、
+# 环境变量），只是 image 用固定版本号而不是 build + :latest。
+# 详见 README「离线部署（预构建镜像）」。
+#
+# 要求：Docker + compose 插件、/dev/net/tun、NET_ADMIN。
+#
+# 镜像 tag 由 Release 资产决定：v1.0.0 对应 wg-backend:1.0.0 + wg-portal:1.0.0。
+
+services:
+  wireguard:
+    image: wg-backend:1.0.0
+    container_name: wg-backend
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./etc-wireguard:/etc/wireguard
+    environment:
+      # 可选：借用本机出口做 NAT 自愈（"隧道客户端经这台机器上网"的场景）。
+      # 两项都留空 = 关闭（默认）。逻辑与 docker-compose.yml 完全相同。
+      NAT_CIDR: ""        # 例 "10.11.12.0/24"（须与 config.yml 的 start_cidr_v4 一致）
+      NAT_IFACE: ""       # 例 "eth0"（本机 LAN 出口网卡）
+    restart: unless-stopped
+
+  wg-portal:
+    image: wg-portal:1.0.0
+    container_name: wg-portal
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./config.yml:/app/config/config.yml:ro
+      - ./data:/app/data
+      - ./etc-wireguard:/etc/wireguard
+    restart: unless-stopped

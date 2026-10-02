@@ -23,7 +23,7 @@
 #      wg-portal rewrites them, and a live-but-broken tunnel self-heals.
 #
 # Optional NAT self-healing (for "borrow route via this machine" topologies):
-#   NAT_CIDR  e.g. 10.13.13.0/24  (your tunnel client subnet)
+#   NAT_CIDR  e.g. 10.11.12.0/24  (your tunnel client subnet)
 #   NAT_IFACE e.g. eth0           (machine's LAN egress interface)
 # Both empty (default) disables it. iptables state is lost on host reboot, so
 # the watchdog re-establishes the MASQUERADE/FORWARD rules at startup; rules

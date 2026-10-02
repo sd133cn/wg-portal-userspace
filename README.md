@@ -17,12 +17,14 @@
 ## 仓库结构
 
 ```
-├── docker-compose.yml    # 两容器、host 网络、NET_ADMIN、/dev/net/tun
-├── config.yml            # wg-portal 配置（首启 admin 账号、端口、网段、共享目录）
-├── backend/              # 数据面：Dockerfile + wg-watch.sh 看门狗
-├── portal/               # 控制面：wg-portal 源码（含 userspace 补丁 + 完整前端构建）
-├── data/                 # 运行时生成：SQLite（用户/密钥/peer），勿提交
-└── etc-wireguard/        # 运行时生成：隧道 .conf（portal 写、backend 读），勿提交
+├── docker-compose.yml          # 源码构建部署：两容器、host 网络、NET_ADMIN、/dev/net/tun
+├── docker-compose.release.yml  # 离线部署：用预构建镜像（固定版本 tag，无 build）
+├── config.yml                  # wg-portal 配置（首启 admin 账号、端口、网段、共享目录）
+├── backend/                    # 数据面：Dockerfile + wg-watch.sh 看门狗
+├── portal/                     # 控制面：wg-portal 源码（含 userspace 补丁 + 完整前端构建）
+├── scripts/                    # 维护者脚本（构建并导出离线镜像 tar）
+├── data/                       # 运行时生成：SQLite（用户/密钥/peer），勿提交
+└── etc-wireguard/              # 运行时生成：隧道 .conf（portal 写、backend 读），勿提交
 ```
 
 - **wg-portal（控制面）**：Web UI + API，端口 8888。所有状态存 `./data` 的 SQLite；每次变更把 wg-quick 格式配置写到 `/etc/wireguard`（= `./etc-wireguard`）。
@@ -38,7 +40,7 @@
 
 要求：Docker（含 compose 插件）+ `/dev/net/tun` + `NET_ADMIN`。
 
-> 首次构建需要联网：`portal` 镜像会 `npm ci`（前端）+ `go mod download`（后端依赖），`backend` 镜像会 `apt-get install wireguard-go wireguard-tools …`。内网/离线环境请先在能联网的机器上 `docker compose build` 再 `docker save` 两个镜像搬运（见「备份与迁移」）。
+> 首次构建需要联网：`portal` 镜像会 `npm ci`（前端）+ `go mod download`（后端依赖），`backend` 镜像会 `apt-get install wireguard-go wireguard-tools …`。**不能联网的机器不要用这一节**，直接用「离线部署（预构建镜像）」里的镜像 tar，跳过 build。
 
 ```bash
 git clone <your-repo-url> && cd wg-portal-userspace
@@ -66,6 +68,44 @@ docker compose up -d --build
 - `docker compose logs -f wireguard` 里看 `[wg-watch]` 日志：`kernel module: NOT AVAILABLE (userspace fallback will be used)` 表示走了 userspace，功能完全正常；
 - `docker compose logs -f wg-portal` 看面板启动与登录日志。
 
+## 离线部署（预构建镜像，无需联网 / 无需 build）
+
+目标机器**不能联网**时（拿不到 npm / apt / go 依赖，`docker compose up -d --build` 必然失败），直接用 Release 页附带的两个镜像，完全跳过构建：
+
+```bash
+# 1) 下载 Release 资产 wg-portal-userspace-images-v1.0.0.tar.gz，载入镜像
+gunzip -c wg-portal-userspace-images-v1.0.0.tar.gz | docker load
+#    （Windows PowerShell：docker load -i wg-portal-userspace-images-v1.0.0.tar，需先解压）
+
+# 2) 确认镜像已就位（应看到 wg-backend:1.0.0 与 wg-portal:1.0.0）
+docker images | findstr wg-          # Linux/macOS: docker images | grep wg-
+
+# 3) 按需改 config.yml（至少设 core.admin_password 与 web.external_url），然后启动
+docker compose -f docker-compose.release.yml up -d
+```
+
+要点：
+
+- `docker-compose.release.yml` 与 `docker-compose.yml` **只有镜像来源不同**：前者用固定版本的 `image:`（`wg-backend:1.0.0` / `wg-portal:1.0.0`）且没有 `build:`，卷挂载、host 网络、`/dev/net/tun`、`NET_ADMIN`、环境变量完全一致；因此启动后的行为、日志、数据目录位置都与源码构建方式相同。
+- Release 里的镜像就是**本仓库这份源码**构建出来的：`wg-portal` 含 userspace fork 补丁与完整的前端构建产物，`wg-backend` 含 `wg-watch.sh` 看门狗。
+- 升级/换版本：`docker load` 新版本的 tar，改 `docker-compose.release.yml` 里的 tag，再 `docker compose -f docker-compose.release.yml up -d`。
+- 只想把镜像搬到另一台（不经过 Release）：在能联网的机器上 `docker save wg-backend:1.0.0 wg-portal:1.0.0 -o images.tar`，拷过去 `docker load -i images.tar`。
+
+### 维护者：自己重新构建这份镜像 tar
+
+```bash
+sh scripts/build-and-save-images.sh 1.0.0     # 产出 dist/wg-portal-userspace-images-v1.0.0.tar.gz
+```
+
+> 构建机器必须能联网（见「快速开始」的提示）。**受限网络**（如国内直连 docker.io / deb.debian.org / npmjs / proxy.golang.org 不通）可在构建时改包源，仓库里的 Dockerfile 保持上游原样，改动放在临时副本里即可：
+>
+> - `backend`：把 `/etc/apt/sources.list.d/debian.sources` 里的 `deb.debian.org` 换成 `mirrors.aliyun.com`。**注意用 `https://` 而不是 `http://`**：本项目的构建验证中发现，部分企业网络会拦截/篡改 80 端口的响应（apt 报 `Clearsigned file isn't valid, got 'NOSPLIT' (does the network require authentication?)`，或索引文件拉一半被 RST），而 443 正常。`debian:bookworm-slim` 里没有 `ca-certificates`，所以首次 `apt-get` 需临时关掉 TLS 校验并随即把 `ca-certificates` 装进镜像：`apt-get update -o Acquire::https::Verify-Peer=false -o Acquire::https::Verify-Host=false`（包的真实性仍由 apt 的 GPG 签名保证）；
+> - `portal` 前端：`npm config set registry https://registry.npmmirror.com`（并把 `package-lock.json` 里的 `registry.npmjs.org` 一并替换）；
+> - `portal` 后端：`go env -w GOPROXY=https://goproxy.cn,direct`；
+> - `portal` 终像：把 `/etc/apk/repositories` 里的 `dl-cdn.alpinelinux.org` 换成 `mirrors.aliyun.com`。
+>
+> 注意：这样构建出的镜像与用原版源构建的镜像**内容等价**，只是拉取依赖的地址不同。
+
 ## 使用限制（userspace 模式）
 
 - **Web UI 上看不到 peer 的实时握手/流量状态**：userspace daemon 的实时状态只在进程内存里，netlink 查询不到（`file does not exist`），这是 4.4 无模块内核的硬限制；若安装发行版提供的 WireGuard 内核模块（如群晖官方 WireGuard 包）则自动恢复且走内核路径，UI 状态完整。
@@ -80,6 +120,8 @@ docker compose up -d --build
 docker save wg-backend:latest wg-portal:latest -o images.tar
 tar czf state.tar.gz data etc-wireguard config.yml
 ```
+
+（镜像 tag 取决于你当初怎么装的：源码构建方式是 `:latest`，离线部署的 Release 镜像是 `:1.0.0`，`docker images` 里照实际 tag 写。）
 
 （只带镜像不带 `data/`+`etc-wireguard/` 则是全新空实例：无账号、无 peer，已配过的客户端全部失效。）
 

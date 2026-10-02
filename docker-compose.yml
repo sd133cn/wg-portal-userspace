@@ -35,7 +35,7 @@ services:
       # world sees traffic coming from the machine (iptables state is lost on
       # reboot, so the watchdog re-establishes the rules at startup).
       # Leave both empty to disable (default).
-      NAT_CIDR: ""        # e.g. "10.13.13.0/24" (must match start_cidr_v4)
+      NAT_CIDR: ""        # e.g. "10.11.12.0/24" (must match start_cidr_v4)
       NAT_IFACE: ""       # e.g. "eth0" (the machine's LAN egress interface)
     restart: unless-stopped
 
