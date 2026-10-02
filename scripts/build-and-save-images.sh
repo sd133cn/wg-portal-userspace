@@ -1,7 +1,7 @@
 #!/bin/sh
 # 维护者用：构建两个镜像并导出成可发布的离线 tar。
 #
-#   sh scripts/build-and-save-images.sh [VERSION]      # 默认 1.0.0
+#   sh scripts/build-and-save-images.sh [VERSION]      # 默认 1.0.1
 #
 # 产物：dist/wg-portal-userspace-images-v<VERSION>.tar.gz
 #   内含 wg-backend:<VERSION> + wg-portal:<VERSION> 两个镜像，
@@ -12,7 +12,7 @@
 # 的说明换成国内镜像源后再构建。
 set -eu
 
-VERSION="${1:-1.0.0}"
+VERSION="${1:-1.0.1}"
 OUT_DIR="${OUT_DIR:-dist}"
 
 cd "$(dirname "$0")/.."

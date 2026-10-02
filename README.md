@@ -83,28 +83,32 @@ docker compose up -d --build
 目标机器**不能联网**时（拿不到 npm / apt / go 依赖，`docker compose up -d --build` 必然失败），直接用 Release 页附带的两个镜像，完全跳过构建：
 
 ```bash
-# 1) 下载 Release 资产 wg-portal-userspace-images-v1.0.0.tar.gz，载入镜像
-gunzip -c wg-portal-userspace-images-v1.0.0.tar.gz | docker load
-#    （Windows PowerShell：docker load -i wg-portal-userspace-images-v1.0.0.tar，需先解压）
+# 1) 下载 Release 资产 wg-portal-userspace-images-v1.0.1.tar.gz，载入镜像
+gunzip -c wg-portal-userspace-images-v1.0.1.tar.gz | docker load
+#    （Windows PowerShell：docker load -i wg-portal-userspace-images-v1.0.1.tar，需先解压）
 
-# 2) 确认镜像已就位（应看到 wg-backend:1.0.0 与 wg-portal:1.0.0）
+# 2) 确认镜像已就位（应看到 wg-backend:1.0.1 与 wg-portal:1.0.1）
 docker images | findstr wg-          # Linux/macOS: docker images | grep wg-
 
 # 3) 按需改 config.yml（至少设 core.admin_password 与 web.external_url），然后启动
 docker compose -f docker-compose.release.yml up -d
 ```
 
+> **资产校验（v1.0.1）**：`wg-portal-userspace-images-v1.0.1.tar.gz` = 62,625,884 字节，
+> sha256 `8a99cfd4083f27cb1876062f317b8151efc71402471dcef798b4e19c733037d2`。
+
 要点：
 
-- `docker-compose.release.yml` 与 `docker-compose.yml` **只有镜像来源不同**：前者用固定版本的 `image:`（`wg-backend:1.0.0` / `wg-portal:1.0.0`）且没有 `build:`，卷挂载、host 网络、`/dev/net/tun`、`NET_ADMIN`、环境变量完全一致；因此启动后的行为、日志、数据目录位置都与源码构建方式相同。
+- **v1.0.1 相对 v1.0.0 只改了 `wg-backend` 里的看门狗（`wg-watch.sh`）**，面板镜像无功能变化。**已部署 v1.0.0 的机器建议升级**：在只提供 legacy iptables 的内核上（群晖 DSM / 4.4 内核等），v1.0.0 的看门狗调用的是 nf_tables 版 `iptables`（该内核不支持，`iptables -L -n` 直接返回 rc=4），**NAT 规则会静默失效**（隧道能起、客户端却访问不了内网），且日志里看不出来；v1.0.1 启动时自动在 `iptables` / `iptables-legacy` 之间探测可用的那个并在日志里打印选中的实现。同批修复：peer 计数恒为 0、NAT 自愈被误设成每 5 秒跑一次、内建链上 `iptables -C` 误判导致每轮重复插入 FORWARD 规则。
+- `docker-compose.release.yml` 与 `docker-compose.yml` **只有镜像来源不同**：前者用固定版本的 `image:`（`wg-backend:1.0.1` / `wg-portal:1.0.1`）且没有 `build:`，卷挂载、host 网络、`/dev/net/tun`、`NET_ADMIN`、环境变量完全一致；因此启动后的行为、日志、数据目录位置都与源码构建方式相同。
 - Release 里的镜像就是**本仓库这份源码**构建出来的：`wg-portal` 含 userspace fork 补丁与完整的前端构建产物，`wg-backend` 含 `wg-watch.sh` 看门狗。
 - 升级/换版本：`docker load` 新版本的 tar，改 `docker-compose.release.yml` 里的 tag，再 `docker compose -f docker-compose.release.yml up -d`。
-- 只想把镜像搬到另一台（不经过 Release）：在能联网的机器上 `docker save wg-backend:1.0.0 wg-portal:1.0.0 -o images.tar`，拷过去 `docker load -i images.tar`。
+- 只想把镜像搬到另一台（不经过 Release）：在能联网的机器上 `docker save wg-backend:1.0.1 wg-portal:1.0.1 -o images.tar`，拷过去 `docker load -i images.tar`。
 
 ### 维护者：自己重新构建这份镜像 tar
 
 ```bash
-sh scripts/build-and-save-images.sh 1.0.0     # 产出 dist/wg-portal-userspace-images-v1.0.0.tar.gz
+sh scripts/build-and-save-images.sh 1.0.1     # 产出 dist/wg-portal-userspace-images-v1.0.1.tar.gz
 ```
 
 > 构建机器必须能联网（见「快速开始」的提示）。**受限网络**（如国内直连 docker.io / deb.debian.org / npmjs / proxy.golang.org 不通）可在构建时改包源，仓库里的 Dockerfile 保持上游原样，改动放在临时副本里即可：
@@ -131,7 +135,7 @@ docker save wg-backend:latest wg-portal:latest -o images.tar
 tar czf state.tar.gz data etc-wireguard config.yml
 ```
 
-（镜像 tag 取决于你当初怎么装的：源码构建方式是 `:latest`，离线部署的 Release 镜像是 `:1.0.0`，`docker images` 里照实际 tag 写。）
+（镜像 tag 取决于你当初怎么装的：源码构建方式是 `:latest`，离线部署的 Release 镜像是 `:1.0.1`，`docker images` 里照实际 tag 写。）
 
 （只带镜像不带 `data/`+`etc-wireguard/` 则是全新空实例：无账号、无 peer，已配过的客户端全部失效。）
 

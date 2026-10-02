@@ -1,6 +1,6 @@
 # wg-portal (userspace fork) - offline deployment from prebuilt images
 #
-#   docker load -i wg-portal-userspace-images-v1.0.0.tar        # 或 gunzip 后 load
+#   docker load -i wg-portal-userspace-images-v1.0.1.tar        # 或 gunzip 后 load
 #   docker compose -f docker-compose.release.yml up -d
 #
 # 用途：目标机器**不能联网**（拿不到 npm/apt/go 依赖，无法本地 build）时，
@@ -12,11 +12,13 @@
 #
 # 要求：Docker + compose 插件、/dev/net/tun、NET_ADMIN。
 #
-# 镜像 tag 由 Release 资产决定：v1.0.0 对应 wg-backend:1.0.0 + wg-portal:1.0.0。
+# 镜像 tag 由 Release 资产决定：v1.0.1 对应 wg-backend:1.0.1 + wg-portal:1.0.1
+# （v1.0.0 资产是同一份源码的早期构建，其看门狗在「只有 legacy iptables」的内核上
+#   会静默丢失 NAT 规则，建议用 v1.0.1 及以上）。
 
 services:
   wireguard:
-    image: wg-backend:1.0.0
+    image: wg-backend:1.0.1
     container_name: wg-backend
     network_mode: host
     cap_add:
@@ -33,7 +35,7 @@ services:
     restart: unless-stopped
 
   wg-portal:
-    image: wg-portal:1.0.0
+    image: wg-portal:1.0.1
     container_name: wg-portal
     network_mode: host
     cap_add:
