@@ -1,0 +1,161 @@
+package domain
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"golang.org/x/crypto/bcrypt"
+)
+
+func TestUser_IsDisabled(t *testing.T) {
+	user := &User{}
+	assert.False(t, user.IsDisabled())
+
+	now := time.Now()
+	user.Disabled = &now
+	assert.True(t, user.IsDisabled())
+}
+
+func TestUser_IsLocked(t *testing.T) {
+	user := &User{}
+	assert.False(t, user.IsLocked())
+
+	now := time.Now()
+	user.Locked = &now
+	assert.True(t, user.IsLocked())
+}
+
+func TestUser_IsApiEnabled(t *testing.T) {
+	user := &User{}
+	assert.False(t, user.IsApiEnabled())
+
+	user.ApiToken = "token"
+	assert.True(t, user.IsApiEnabled())
+}
+
+func TestUser_CanChangePassword(t *testing.T) {
+	user := &User{Authentications: []UserAuthentication{{Source: UserSourceDatabase}}}
+	assert.NoError(t, user.CanChangePassword())
+
+	user.Authentications = []UserAuthentication{{Source: UserSourceLdap}}
+	assert.Error(t, user.CanChangePassword())
+
+	user.Authentications = []UserAuthentication{{Source: UserSourceOauth}}
+	assert.Error(t, user.CanChangePassword())
+
+	user.Authentications = []UserAuthentication{{Source: UserSourceLdap}, {Source: UserSourceDatabase}}
+	assert.NoError(t, user.CanChangePassword())
+
+	user.Authentications = []UserAuthentication{{Source: UserSourceOauth}, {Source: UserSourceDatabase}}
+	assert.NoError(t, user.CanChangePassword())
+}
+
+func TestUser_EditAllowed(t *testing.T) {
+	user := &User{Authentications: []UserAuthentication{{Source: UserSourceDatabase}}}
+	newUser := &User{Authentications: []UserAuthentication{{Source: UserSourceDatabase}}}
+	assert.NoError(t, user.EditAllowed(newUser))
+
+	newUser.Notes = "notes can be changed"
+	assert.NoError(t, user.EditAllowed(newUser))
+
+	newUser.Disabled = &time.Time{}
+	assert.NoError(t, user.EditAllowed(newUser))
+
+	newUser.Lastname = "lastname or other fields can be changed"
+	assert.NoError(t, user.EditAllowed(newUser))
+
+	user.Authentications = []UserAuthentication{{Source: UserSourceLdap}}
+	newUser.Authentications = []UserAuthentication{{Source: UserSourceLdap}}
+	newUser.Disabled = nil
+	newUser.Lastname = ""
+	newUser.Notes = "notes can be changed"
+	assert.NoError(t, user.EditAllowed(newUser))
+
+	newUser.Disabled = &time.Time{}
+	assert.NoError(t, user.EditAllowed(newUser))
+
+	newUser.Lastname = "lastname or other fields can not be changed"
+	assert.Error(t, user.EditAllowed(newUser))
+
+	user.Authentications = []UserAuthentication{{Source: UserSourceOauth}}
+	newUser.Authentications = []UserAuthentication{{Source: UserSourceOauth}}
+	newUser.Disabled = nil
+	newUser.Lastname = ""
+	newUser.Notes = "notes can be changed"
+	assert.NoError(t, user.EditAllowed(newUser))
+
+	newUser.Disabled = &time.Time{}
+	assert.NoError(t, user.EditAllowed(newUser))
+
+	newUser.Lastname = "lastname or other fields can not be changed"
+	assert.Error(t, user.EditAllowed(newUser))
+
+	user.Authentications = []UserAuthentication{{Source: UserSourceOauth}, {Source: UserSourceDatabase}}
+	newUser.Authentications = []UserAuthentication{{Source: UserSourceOauth}, {Source: UserSourceDatabase}}
+	newUser.PersistLocalChanges = true
+	newUser.Disabled = nil
+	newUser.Lastname = ""
+	newUser.Notes = "notes can be changed"
+	assert.NoError(t, user.EditAllowed(newUser))
+
+	newUser.Disabled = &time.Time{}
+	assert.NoError(t, user.EditAllowed(newUser))
+
+	newUser.Lastname = "lastname or other fields can be changed"
+	assert.NoError(t, user.EditAllowed(newUser))
+}
+
+func TestUser_DeleteAllowed(t *testing.T) {
+	user := &User{}
+	assert.NoError(t, user.DeleteAllowed())
+}
+
+func TestUser_CheckPassword(t *testing.T) {
+	password := "password"
+	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+
+	user := &User{
+		Authentications: []UserAuthentication{{Source: UserSourceDatabase}}, Password: PrivateString(hashedPassword),
+	}
+	assert.NoError(t, user.CheckPassword(password))
+
+	user.Password = ""
+	assert.Error(t, user.CheckPassword(password))
+
+	user.Authentications = []UserAuthentication{{Source: UserSourceLdap}}
+	assert.Error(t, user.CheckPassword(password))
+}
+
+func TestUser_CheckApiToken(t *testing.T) {
+	user := &User{}
+	assert.Error(t, user.CheckApiToken("token"))
+
+	user.ApiToken = "token"
+	assert.NoError(t, user.CheckApiToken("token"))
+
+	assert.Error(t, user.CheckApiToken("wrong_token"))
+}
+
+func TestUser_HashPassword(t *testing.T) {
+	user := &User{Password: "password"}
+	assert.NoError(t, user.HashPassword())
+	assert.NotEmpty(t, user.Password)
+
+	user.Password = ""
+	assert.NoError(t, user.HashPassword())
+}
+
+func TestUser_CreateDefaultPeers(t *testing.T) {
+	user := &User{}
+	assert.True(t, user.CreateDefaultPeers())
+
+	user2 := &User{Disabled: &time.Time{}}
+	assert.False(t, user2.CreateDefaultPeers())
+
+	user3 := &User{Locked: &time.Time{}}
+	assert.False(t, user3.CreateDefaultPeers())
+
+	user4 := &User{Disabled: &time.Time{}, Locked: &time.Time{}}
+	assert.False(t, user4.CreateDefaultPeers())
+}

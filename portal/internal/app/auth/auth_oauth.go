@@ -1,0 +1,195 @@
+package auth
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"golang.org/x/oauth2"
+
+	"github.com/h44z/wg-portal/internal"
+	"github.com/h44z/wg-portal/internal/config"
+	"github.com/h44z/wg-portal/internal/domain"
+)
+
+// PlainOauthAuthenticator is an authenticator that uses OAuth for authentication.
+// User information is retrieved from the specified user info endpoint.
+type PlainOauthAuthenticator struct {
+	name                 string
+	cfg                  *oauth2.Config
+	userInfoEndpoint     string
+	client               *http.Client
+	userInfoMapping      config.OauthFields
+	userAdminMapping     *config.OauthAdminMapping
+	registrationEnabled  bool
+	userInfoLogging      bool
+	sensitiveInfoLogging bool
+	allowedDomains       []string
+	allowedUserGroups    []string
+	usePKCE              bool
+	pkceMethod           string
+}
+
+func newPlainOauthAuthenticator(
+	_ context.Context,
+	callbackUrl string,
+	cfg *config.OAuthProvider,
+) (*PlainOauthAuthenticator, error) {
+	var provider = &PlainOauthAuthenticator{}
+
+	provider.name = cfg.ProviderName
+	provider.client = &http.Client{
+		Timeout: time.Second * 10,
+	}
+	provider.cfg = &oauth2.Config{
+		ClientID:     cfg.ClientID,
+		ClientSecret: cfg.ClientSecret,
+		Endpoint: oauth2.Endpoint{
+			AuthURL:   cfg.AuthURL,
+			TokenURL:  cfg.TokenURL,
+			AuthStyle: oauth2.AuthStyleAutoDetect,
+		},
+		RedirectURL: callbackUrl,
+		Scopes:      cfg.Scopes,
+	}
+	provider.userInfoEndpoint = cfg.UserInfoURL
+	provider.userInfoMapping = getOauthFieldMapping(cfg.FieldMap)
+	provider.userAdminMapping = &cfg.AdminMapping
+	provider.registrationEnabled = cfg.RegistrationEnabled
+	provider.userInfoLogging = cfg.LogUserInfo
+	provider.sensitiveInfoLogging = cfg.LogSensitiveInfo
+	provider.allowedDomains = cfg.AllowedDomains
+	provider.allowedUserGroups = cfg.AllowedUserGroups
+	provider.usePKCE = cfg.UsePKCE == nil || *cfg.UsePKCE
+	provider.pkceMethod = cfg.PKCEMethod
+	if provider.pkceMethod == "" {
+		provider.pkceMethod = pkceMethodS256
+	}
+	if provider.usePKCE && provider.pkceMethod != pkceMethodS256 && provider.pkceMethod != pkceMethodPlain {
+		return nil, fmt.Errorf("unsupported PKCE method %q, allowed: S256, plain", provider.pkceMethod)
+	}
+
+	return provider, nil
+}
+
+// GetName returns the name of the OAuth authenticator.
+func (p PlainOauthAuthenticator) GetName() string {
+	return p.name
+}
+
+func (p PlainOauthAuthenticator) GetAllowedDomains() []string {
+	return p.allowedDomains
+}
+
+func (p PlainOauthAuthenticator) GetAllowedUserGroups() []string {
+	return p.allowedUserGroups
+}
+
+func (p PlainOauthAuthenticator) GetLogoutUrl(_, _ string) (string, bool) {
+	return "", false
+}
+
+// PKCEAuthCodeOptions returns PKCE options for the authorization request and the verifier for the token exchange.
+func (p PlainOauthAuthenticator) PKCEAuthCodeOptions() ([]oauth2.AuthCodeOption, string) {
+	if !p.usePKCE {
+		return nil, ""
+	}
+
+	verifier := oauth2.GenerateVerifier()
+	if p.pkceMethod == pkceMethodPlain {
+		return []oauth2.AuthCodeOption{
+			oauth2.SetAuthURLParam("code_challenge", verifier),
+			oauth2.SetAuthURLParam("code_challenge_method", pkceMethodPlain),
+		}, verifier
+	}
+
+	return []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}, verifier
+}
+
+// PKCETokenOptions returns PKCE options for the token exchange.
+func (p PlainOauthAuthenticator) PKCETokenOptions(verifier string) []oauth2.AuthCodeOption {
+	if !p.usePKCE || verifier == "" {
+		return nil
+	}
+
+	return []oauth2.AuthCodeOption{oauth2.VerifierOption(verifier)}
+}
+
+// RegistrationEnabled returns whether registration is enabled for the OAuth authenticator.
+func (p PlainOauthAuthenticator) RegistrationEnabled() bool {
+	return p.registrationEnabled
+}
+
+// GetType returns the type of the authenticator.
+func (p PlainOauthAuthenticator) GetType() AuthenticatorType {
+	return AuthenticatorTypeOAuth
+}
+
+// AuthCodeURL returns the URL to redirect the user to for authentication.
+func (p PlainOauthAuthenticator) AuthCodeURL(state string, opts ...oauth2.AuthCodeOption) string {
+	return p.cfg.AuthCodeURL(state, opts...)
+}
+
+// Exchange exchanges the OAuth code for a token.
+func (p PlainOauthAuthenticator) Exchange(
+	ctx context.Context,
+	code string,
+	opts ...oauth2.AuthCodeOption,
+) (*oauth2.Token, error) {
+	return p.cfg.Exchange(ctx, code, opts...)
+}
+
+// GetUserInfo retrieves the user information from the user info endpoint.
+func (p PlainOauthAuthenticator) GetUserInfo(
+	ctx context.Context,
+	token *oauth2.Token,
+	_ string,
+) (map[string]any, error) {
+	req, err := http.NewRequest("GET", p.userInfoEndpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create user info get request: %w", err)
+	}
+	req.Header.Add("Authorization", "Bearer "+token.AccessToken)
+	req.WithContext(ctx)
+
+	response, err := p.client.Do(req)
+	if err != nil {
+		if p.sensitiveInfoLogging {
+			slog.Debug("OAuth: failed to get user info", "endpoint", p.userInfoEndpoint,
+				"token", token, "error", err)
+		}
+		return nil, fmt.Errorf("failed to get user info: %w", err)
+	}
+	defer internal.LogClose(response.Body)
+	contents, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var userFields map[string]any
+	err = json.Unmarshal(contents, &userFields)
+	if err != nil {
+		if p.sensitiveInfoLogging {
+			slog.Debug("OAuth: failed to parse user info", "endpoint", p.userInfoEndpoint,
+				"token", token, "contents", contents, "error", err)
+		}
+		return nil, fmt.Errorf("failed to parse user info: %w", err)
+	}
+
+	if p.userInfoLogging {
+		slog.Debug("OAuth: user info debug",
+			"source", p.name,
+			"info", string(contents))
+	}
+
+	return userFields, nil
+}
+
+// ParseUserInfo parses the user information from the raw data.
+func (p PlainOauthAuthenticator) ParseUserInfo(raw map[string]any) (*domain.AuthenticatorUserInfo, error) {
+	return parseOauthUserInfo(p.userInfoMapping, p.userAdminMapping, raw, "oauth", p.name)
+}

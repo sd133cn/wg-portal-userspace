@@ -1,0 +1,167 @@
+package domain
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/h44z/wg-portal/internal/config"
+)
+
+func TestInterface_IsDisabledReturnsTrueWhenDisabled(t *testing.T) {
+	iface := &Interface{}
+	assert.False(t, iface.IsDisabled())
+
+	now := time.Now()
+	iface.Disabled = &now
+	assert.True(t, iface.IsDisabled())
+}
+
+func TestInterface_AddressStrReturnsCorrectString(t *testing.T) {
+	iface := &Interface{
+		Addresses: []Cidr{
+			{Cidr: "192.168.1.1/24", Addr: "192.168.1.1", NetLength: 24},
+			{Cidr: "10.0.0.1/24", Addr: "10.0.0.1", NetLength: 24},
+		},
+	}
+	expected := "192.168.1.1/24,10.0.0.1/24"
+	assert.Equal(t, expected, iface.AddressStr())
+}
+
+func TestInterface_GetConfigFileNameReturnsCorrectFileName(t *testing.T) {
+	iface := &Interface{Identifier: "wg0"}
+	expected := "wg0.conf"
+	assert.Equal(t, expected, iface.GetConfigFileName())
+
+	iface.Identifier = "wg0@123"
+	expected = "wg0123.conf"
+	assert.Equal(t, expected, iface.GetConfigFileName())
+}
+
+func TestInterface_GetAllowedIPsReturnsCorrectCidrsServerMode(t *testing.T) {
+	peer1 := Peer{
+		AllowedIPsStr: ConfigOption[string]{Value: "192.168.2.2/32"},
+		Interface: PeerInterfaceConfig{
+			Addresses: []Cidr{
+				{Cidr: "192.168.1.2/32", Addr: "192.168.1.2", NetLength: 32},
+			},
+		},
+	}
+	peer2 := Peer{
+		AllowedIPsStr:      ConfigOption[string]{Value: "10.0.2.2/32"},
+		ExtraAllowedIPsStr: "10.20.2.2/32",
+		Interface: PeerInterfaceConfig{
+			Addresses: []Cidr{
+				{Cidr: "10.0.0.2/32", Addr: "10.0.0.2", NetLength: 32},
+			},
+		},
+	}
+	iface := &Interface{Type: InterfaceTypeServer}
+	expected := []Cidr{
+		{Cidr: "192.168.1.2/32", Addr: "192.168.1.2", NetLength: 32},
+		{Cidr: "10.0.0.2/32", Addr: "10.0.0.2", NetLength: 32},
+		{Cidr: "10.20.2.2/32", Addr: "10.20.2.2", NetLength: 32},
+	}
+	assert.Equal(t, expected, iface.GetAllowedIPs([]Peer{peer1, peer2}))
+}
+
+func TestInterface_GetAllowedIPsReturnsCorrectCidrsClientMode(t *testing.T) {
+	peer1 := Peer{
+		AllowedIPsStr: ConfigOption[string]{Value: "192.168.2.2/32"},
+		Interface: PeerInterfaceConfig{
+			Addresses: []Cidr{
+				{Cidr: "192.168.1.2/32", Addr: "192.168.1.2", NetLength: 32},
+			},
+		},
+	}
+	peer2 := Peer{
+		AllowedIPsStr:      ConfigOption[string]{Value: "10.0.2.2/32"},
+		ExtraAllowedIPsStr: "10.20.2.2/32",
+		Interface: PeerInterfaceConfig{
+			Addresses: []Cidr{
+				{Cidr: "10.0.0.2/32", Addr: "10.0.0.2", NetLength: 32},
+			},
+		},
+	}
+	iface := &Interface{Type: InterfaceTypeClient}
+	expected := []Cidr{
+		{Cidr: "192.168.2.2/32", Addr: "192.168.2.2", NetLength: 32},
+		{Cidr: "10.0.2.2/32", Addr: "10.0.2.2", NetLength: 32},
+	}
+	assert.Equal(t, expected, iface.GetAllowedIPs([]Peer{peer1, peer2}))
+}
+
+func TestInterface_ManageRoutingTableReturnsCorrectValue(t *testing.T) {
+	iface := &Interface{RoutingTable: "off"}
+	assert.False(t, iface.ManageRoutingTable())
+
+	iface.RoutingTable = "100"
+	assert.True(t, iface.ManageRoutingTable())
+
+	iface = &Interface{RoutingTable: "off", Backend: config.LocalBackendName}
+	assert.False(t, iface.ManageRoutingTable())
+
+	iface.RoutingTable = "100"
+	assert.True(t, iface.ManageRoutingTable())
+
+	iface = &Interface{RoutingTable: "off", Backend: "mikrotik-xxx"}
+	assert.False(t, iface.ManageRoutingTable())
+
+	iface.RoutingTable = "100"
+	assert.True(t, iface.ManageRoutingTable())
+}
+
+func TestInterface_GetRoutingTableReturnsCorrectValue(t *testing.T) {
+	iface := &Interface{RoutingTable: "", Backend: config.LocalBackendName}
+	assert.Equal(t, 0, iface.GetRoutingTable())
+
+	iface.RoutingTable = "off"
+	assert.Equal(t, -1, iface.GetRoutingTable())
+
+	iface.RoutingTable = "0x64"
+	assert.Equal(t, 100, iface.GetRoutingTable())
+
+	iface.RoutingTable = "200"
+	assert.Equal(t, 200, iface.GetRoutingTable())
+}
+
+func TestInterface_GetRoutingTableNonLocal(t *testing.T) {
+	iface := &Interface{RoutingTable: "off", Backend: "something different"}
+	assert.Equal(t, -1, iface.GetRoutingTable())
+
+	iface.RoutingTable = "0"
+	assert.Equal(t, 0, iface.GetRoutingTable())
+
+	iface.RoutingTable = "100"
+	assert.Equal(t, 0, iface.GetRoutingTable())
+
+	iface.RoutingTable = "abc"
+	assert.Equal(t, 0, iface.GetRoutingTable())
+}
+
+func TestInterface_CreateDefaultPeers(t *testing.T) {
+	iface := &Interface{}
+	assert.False(t, iface.CreateDefaultPeers())
+
+	iface.CreateDefaultPeer = true
+	assert.False(t, iface.CreateDefaultPeers()) // still wrong type
+
+	iface2 := &Interface{Type: InterfaceTypeServer}
+	assert.False(t, iface2.CreateDefaultPeers()) // CreateDefaultPeer flag is false
+
+	iface2.CreateDefaultPeer = true
+	assert.True(t, iface2.CreateDefaultPeers())
+
+	iface3 := &Interface{Type: InterfaceTypeClient}
+	assert.False(t, iface3.CreateDefaultPeers())
+
+	iface3.CreateDefaultPeer = true
+	assert.False(t, iface3.CreateDefaultPeers())
+
+	iface4 := &Interface{Type: InterfaceTypeAny}
+	assert.False(t, iface4.CreateDefaultPeers())
+
+	iface4.CreateDefaultPeer = true
+	assert.False(t, iface4.CreateDefaultPeers())
+}

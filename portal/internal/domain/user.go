@@ -1,0 +1,442 @@
+package domain
+
+import (
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
+)
+
+const (
+	UserSourceLdap     UserSource = "ldap"  // LDAP / ActiveDirectory
+	UserSourceDatabase UserSource = "db"    // sqlite / mysql database
+	UserSourceOauth    UserSource = "oauth" // oauth / open id connect
+)
+
+type UserIdentifier string
+
+type UserSource string
+
+type UserAuthentication struct {
+	BaseModel
+
+	UserIdentifier UserIdentifier `gorm:"primaryKey;column:user_identifier"` // sAMAccountName, sub, etc.
+	Source         UserSource     `gorm:"primaryKey;column:source"`
+	ProviderName   string         `gorm:"primaryKey;column:provider_name"`
+}
+
+// User is the user model that gets linked to peer entries, by default an empty user model with only the email address is created
+type User struct {
+	BaseModel
+
+	// required fields
+	Identifier   UserIdentifier `gorm:"primaryKey;column:identifier"`
+	Email        string         `form:"email" binding:"required,email"`
+	Source       UserSource     // deprecated: moved to Authentications.Source
+	ProviderName string         // deprecated: moved to Authentications.ProviderName
+	IsAdmin      bool
+
+	// authentication sources
+	Authentications []UserAuthentication `gorm:"foreignKey:user_identifier"`
+	// synchronization behavior
+	PersistLocalChanges bool `gorm:"column:persist_local_changes"`
+
+	// optional fields
+	Firstname  string `form:"firstname" binding:"omitempty"`
+	Lastname   string `form:"lastname" binding:"omitempty"`
+	Phone      string `form:"phone" binding:"omitempty"`
+	Department string `form:"department" binding:"omitempty"`
+	Notes      string `form:"notes" binding:"omitempty"`
+
+	// optional, integrated password authentication
+	Password       PrivateString `form:"password" binding:"omitempty"`
+	Disabled       *time.Time    `gorm:"index;column:disabled"` // if this field is set, the user is disabled (WireGuard peers are disabled as well)
+	DisabledReason string        // the reason why the user has been disabled
+	Locked         *time.Time    `gorm:"index;column:locked"` // if this field is set, the user is locked and can no longer login (WireGuard peers still can connect)
+	LockedReason   string        // the reason why the user has been locked
+
+	// Passwordless authentication
+	WebAuthnId             string                   `gorm:"column:webauthn_id"`         // the webauthn id of the user, used for webauthn authentication
+	WebAuthnCredentialList []UserWebauthnCredential `gorm:"foreignKey:user_identifier"` // the webauthn credentials of the user, used for webauthn authentication
+
+	// API token for REST API access
+	ApiToken        string `form:"api_token" binding:"omitempty" gorm:"serializer:encstr"`
+	ApiTokenCreated *time.Time
+
+	LinkedPeerCount int `gorm:"-"`
+}
+
+// IsDisabled returns true if the user is disabled. In such a case,
+// no login is possible and WireGuard peers associated with the user are disabled.
+func (u *User) IsDisabled() bool {
+	return u.Disabled != nil
+}
+
+// IsLocked returns true if the user is locked. In such a case, no login is possible, WireGuard connections still work.
+func (u *User) IsLocked() bool {
+	return u.Locked != nil
+}
+
+func (u *User) IsApiEnabled() bool {
+	if u.ApiToken != "" {
+		return true
+	}
+
+	return false
+}
+
+func (u *User) CanChangePassword() error {
+	if slices.ContainsFunc(u.Authentications, func(e UserAuthentication) bool {
+		return e.Source == UserSourceDatabase
+	}) {
+		return nil // password can be changed for database users
+	}
+
+	return errors.New("password change only allowed for database source")
+}
+
+func (u *User) HasWeakPassword(minLength int) error {
+	if !slices.ContainsFunc(u.Authentications, func(e UserAuthentication) bool {
+		return e.Source == UserSourceDatabase
+	}) {
+		return nil // password is not required for non-database users, so no check needed
+	}
+
+	if u.Password == "" {
+		return nil // password is not set, so no check needed
+	}
+
+	if len(u.Password) < minLength {
+		return fmt.Errorf("password is too short, minimum length is %d", minLength)
+	}
+
+	return nil // password is strong enough
+}
+
+func (u *User) EditAllowed(new *User) error {
+	if len(u.Authentications) == 1 && u.Authentications[0].Source == UserSourceDatabase {
+		return nil // database-only users can be edited always
+	}
+
+	if new.PersistLocalChanges {
+		return nil // if changes will be persisted locally, they can be edited always
+	}
+
+	// for users which are not database users, only the notes field and the disabled flag can be updated
+	updateOk := u.Identifier == new.Identifier
+	updateOk = updateOk && u.IsAdmin == new.IsAdmin
+	updateOk = updateOk && u.Email == new.Email
+	updateOk = updateOk && u.Firstname == new.Firstname
+	updateOk = updateOk && u.Lastname == new.Lastname
+	updateOk = updateOk && u.Phone == new.Phone
+	updateOk = updateOk && u.Department == new.Department
+
+	if !updateOk {
+		return errors.New("edit only allowed for reserved fields")
+	}
+
+	return nil
+}
+
+func (u *User) DeleteAllowed() error {
+	return nil // all users can be deleted, OAuth and LDAP users might still be recreated
+}
+
+func (u *User) CheckPassword(password string) error {
+	if !slices.ContainsFunc(u.Authentications, func(e UserAuthentication) bool {
+		return e.Source == UserSourceDatabase
+	}) {
+		return errors.New("invalid user source") // password can only be checked for database users
+	}
+
+	if u.IsDisabled() {
+		return errors.New("user disabled")
+	}
+
+	if u.Password == "" {
+		return errors.New("empty user password")
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(password)); err != nil {
+		return errors.New("wrong password")
+	}
+
+	return nil
+}
+
+func (u *User) CheckApiToken(token string) error {
+	if !u.IsApiEnabled() {
+		return errors.New("api access disabled")
+	}
+
+	if res := subtle.ConstantTimeCompare([]byte(u.ApiToken), []byte(token)); res != 1 {
+		return errors.New("wrong token")
+	}
+
+	return nil
+}
+
+func (u *User) HashPassword() error {
+	if u.Password == "" {
+		return nil // nothing to hash
+	}
+
+	if _, err := bcrypt.Cost([]byte(u.Password)); err == nil {
+		return nil // password already hashed
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(u.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	u.Password = PrivateString(hash)
+
+	return nil
+}
+
+func (u *User) CopyCalculatedAttributes(src *User, withAuthentications bool) {
+	u.BaseModel = src.BaseModel
+	u.LinkedPeerCount = src.LinkedPeerCount
+	if withAuthentications {
+		u.Authentications = src.Authentications
+		u.WebAuthnId = src.WebAuthnId
+		u.WebAuthnCredentialList = src.WebAuthnCredentialList
+	}
+}
+
+// CopyAdminAttributes copies all attributes from the given user except password, passkey and
+// api-token if apiAdminOnly is false.
+func (u *User) CopyAdminAttributes(src *User, apiAdminOnly bool) {
+	u.BaseModel = src.BaseModel
+	u.Identifier = src.Identifier
+	u.Email = src.Email
+	u.Source = src.Source
+	u.ProviderName = src.ProviderName
+	u.IsAdmin = src.IsAdmin
+	u.Authentications = src.Authentications
+	u.PersistLocalChanges = src.PersistLocalChanges
+	u.Firstname = src.Firstname
+	u.Lastname = src.Lastname
+	u.Phone = src.Phone
+	u.Department = src.Department
+	u.Notes = src.Notes
+	u.Disabled = src.Disabled
+	u.DisabledReason = src.DisabledReason
+	u.Locked = src.Locked
+	u.LockedReason = src.LockedReason
+	u.LinkedPeerCount = src.LinkedPeerCount
+	if apiAdminOnly {
+		u.ApiToken = src.ApiToken
+		u.ApiTokenCreated = src.ApiTokenCreated
+	}
+}
+
+// MergeAuthSources merges the given authentication sources with the existing ones.
+// Already existing sources are not overwritten, nor will be added any duplicates.
+func (u *User) MergeAuthSources(extSources ...UserAuthentication) {
+	for _, src := range extSources {
+		if !slices.Contains(u.Authentications, src) {
+			u.Authentications = append(u.Authentications, src)
+		}
+	}
+}
+
+// DisplayName returns the display name of the user.
+// The display name is the first and last name, or the email address of the user.
+// If none of these fields are set, the user identifier is returned.
+func (u *User) DisplayName() string {
+	var displayName string
+	switch {
+	case u.Firstname != "" && u.Lastname != "":
+		displayName = fmt.Sprintf("%s %s", u.Firstname, u.Lastname)
+	case u.Firstname != "":
+		displayName = u.Firstname
+	case u.Lastname != "":
+		displayName = u.Lastname
+	case u.Email != "":
+		displayName = u.Email
+	default:
+		displayName = string(u.Identifier)
+	}
+
+	return displayName
+}
+
+// CreateDefaultPeers determines whether default peers should be created for this user.
+func (u *User) CreateDefaultPeers() bool {
+	if u.IsDisabled() {
+		return false
+	}
+	if u.IsLocked() {
+		return false
+	}
+
+	return true
+}
+
+// SanitizeExternalData sanitizes user profile fields received from an external identity provider.
+// Returns ErrInvalidData if the identifier becomes empty after sanitization.
+func (u *User) SanitizeExternalData(providerType, providerName string) error {
+	identifier := string(u.Identifier)
+	LogSanitizeChange(providerType, providerName, "identifier", identifier,
+		func() string { return SanitizeIdentifier(identifier, 256) }, &identifier)
+	u.Identifier = UserIdentifier(identifier)
+
+	LogSanitizeChange(providerType, providerName, "email", u.Email,
+		func() string { return SanitizeEmail(u.Email, 254) }, &u.Email)
+	LogSanitizeChange(providerType, providerName, "firstname", u.Firstname,
+		func() string { return SanitizeString(u.Firstname, 128) }, &u.Firstname)
+	LogSanitizeChange(providerType, providerName, "lastname", u.Lastname,
+		func() string { return SanitizeString(u.Lastname, 128) }, &u.Lastname)
+	LogSanitizeChange(providerType, providerName, "phone", u.Phone,
+		func() string { return SanitizePhone(u.Phone, 50) }, &u.Phone)
+	LogSanitizeChange(providerType, providerName, "department", u.Department,
+		func() string { return SanitizeString(u.Department, 128) }, &u.Department)
+
+	if u.Identifier == "" {
+		return fmt.Errorf("empty user identifier: %w", ErrInvalidData)
+	}
+
+	return nil
+}
+
+// region webauthn
+
+func (u *User) WebAuthnID() []byte {
+	decodeString, err := base64.StdEncoding.DecodeString(u.WebAuthnId)
+	if err != nil {
+		return nil
+	}
+
+	return decodeString
+}
+
+func (u *User) GenerateWebAuthnId() {
+	randomUid1 := uuid.New().String()                                                              // 32 hex digits + 4 dashes
+	randomUid2 := uuid.New().String()                                                              // 32 hex digits + 4 dashes
+	webAuthnId := []byte(strings.ReplaceAll(fmt.Sprintf("%s%s", randomUid1, randomUid2), "-", "")) // 64 hex digits
+
+	u.WebAuthnId = base64.StdEncoding.EncodeToString(webAuthnId)
+}
+
+func (u *User) WebAuthnName() string {
+	return string(u.Identifier)
+}
+
+func (u *User) WebAuthnDisplayName() string {
+	return u.DisplayName()
+}
+
+func (u *User) WebAuthnCredentials() []webauthn.Credential {
+	credentials := make([]webauthn.Credential, len(u.WebAuthnCredentialList))
+	for i, cred := range u.WebAuthnCredentialList {
+		credential, err := cred.GetCredential()
+		if err != nil {
+			continue
+		}
+		credentials[i] = credential
+	}
+	return credentials
+}
+
+func (u *User) AddCredential(userId UserIdentifier, name string, credential webauthn.Credential) error {
+	cred, err := NewUserWebauthnCredential(userId, name, credential)
+	if err != nil {
+		return err
+	}
+
+	// Check if the credential already exists
+	for _, c := range u.WebAuthnCredentialList {
+		if c.GetCredentialId() == string(credential.ID) {
+			return errors.New("credential already exists")
+		}
+	}
+
+	u.WebAuthnCredentialList = append(u.WebAuthnCredentialList, cred)
+	return nil
+}
+
+func (u *User) UpdateCredential(credentialIdBase64, name string) error {
+	for i, c := range u.WebAuthnCredentialList {
+		if c.CredentialIdentifier == credentialIdBase64 {
+			u.WebAuthnCredentialList[i].DisplayName = name
+			return nil
+		}
+	}
+
+	return errors.New("credential not found")
+}
+
+func (u *User) RemoveCredential(credentialIdBase64 string) {
+	u.WebAuthnCredentialList = slices.DeleteFunc(u.WebAuthnCredentialList, func(e UserWebauthnCredential) bool {
+		return e.CredentialIdentifier == credentialIdBase64
+	})
+}
+
+type UserWebauthnCredential struct {
+	UserIdentifier       string    `gorm:"primaryKey;column:user_identifier"`                   // the user identifier
+	CredentialIdentifier string    `gorm:"primaryKey;uniqueIndex;column:credential_identifier"` // base64 encoded credential id
+	CreatedAt            time.Time `gorm:"column:created_at"`                                   // the time when the credential was created
+	DisplayName          string    `gorm:"column:display_name"`                                 // the display name of the credential
+	SerializedCredential string    `gorm:"column:serialized_credential"`                        // JSON and base64 encoded credential
+}
+
+func NewUserWebauthnCredential(userIdentifier UserIdentifier, name string, credential webauthn.Credential) (
+	UserWebauthnCredential,
+	error,
+) {
+	c := UserWebauthnCredential{
+		UserIdentifier:       string(userIdentifier),
+		CreatedAt:            time.Now(),
+		DisplayName:          name,
+		CredentialIdentifier: base64.StdEncoding.EncodeToString(credential.ID),
+	}
+
+	err := c.SetCredential(credential)
+	if err != nil {
+		return c, err
+	}
+
+	return c, nil
+}
+
+func (c *UserWebauthnCredential) SetCredential(credential webauthn.Credential) error {
+	jsonData, err := json.Marshal(credential)
+	if err != nil {
+		return fmt.Errorf("failed to marshal credential: %w", err)
+	}
+
+	c.SerializedCredential = base64.StdEncoding.EncodeToString(jsonData)
+
+	return nil
+}
+
+func (c *UserWebauthnCredential) GetCredential() (webauthn.Credential, error) {
+	jsonData, err := base64.StdEncoding.DecodeString(c.SerializedCredential)
+	if err != nil {
+		return webauthn.Credential{}, fmt.Errorf("failed to decode base64 credential: %w", err)
+	}
+
+	var credential webauthn.Credential
+	if err := json.Unmarshal(jsonData, &credential); err != nil {
+		return webauthn.Credential{}, fmt.Errorf("failed to unmarshal credential: %w", err)
+	}
+
+	return credential, nil
+}
+
+func (c *UserWebauthnCredential) GetCredentialId() string {
+	decodeString, _ := base64.StdEncoding.DecodeString(c.CredentialIdentifier)
+
+	return string(decodeString)
+}
+
+// endregion webauthn

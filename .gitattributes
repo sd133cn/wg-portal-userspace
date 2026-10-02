@@ -1,0 +1,19 @@
+# The container images are Linux: keep shell scripts and configs LF even when
+# the repository is cloned on Windows (a CRLF wg-watch.sh will not run).
+* text=auto eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Dockerfile text eol=lf
+
+# binary assets are detected automatically (text=auto); list the ones git
+# sometimes misdetects
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary

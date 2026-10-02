@@ -1,0 +1,55 @@
+# wg-portal (userspace fork) - one-command deployment
+#
+#   docker compose up -d --build
+#
+# Two containers, both on the host network (WireGuard needs to own the
+# machine's UDP port and interfaces directly):
+#
+#   wg-portal  - control plane: Web UI (port 8888) + API; stores everything in
+#                ./data (SQLite) and writes tunnel configs to ./etc-wireguard
+#   wireguard  - data plane: applies those configs; uses the kernel WireGuard
+#                module when the host kernel has it, otherwise transparently
+#                falls back to userspace wireguard-go (for module-less kernels
+#                such as Synology DSM 4.4).
+#
+# First run: ./data and ./etc-wireguard start empty; wg-portal creates the
+# default admin account (see config.yml) and you add interfaces/peers in the
+# Web UI. The backend keeps the tunnels alive and re-applies configs that
+# the portal rewrites.
+
+services:
+  wireguard:
+    build: ./backend
+    image: wg-backend:latest
+    container_name: wg-backend
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./etc-wireguard:/etc/wireguard
+    environment:
+      # Optional NAT self-healing for "route via this machine" topologies:
+      # MASQUERADE tunnel clients to the machine's LAN IP so the outside
+      # world sees traffic coming from the machine (iptables state is lost on
+      # reboot, so the watchdog re-establishes the rules at startup).
+      # Leave both empty to disable (default).
+      NAT_CIDR: ""        # e.g. "10.13.13.0/24" (must match start_cidr_v4)
+      NAT_IFACE: ""       # e.g. "eth0" (the machine's LAN egress interface)
+    restart: unless-stopped
+
+  wg-portal:
+    build: ./portal
+    image: wg-portal:latest
+    container_name: wg-portal
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./config.yml:/app/config/config.yml:ro
+      - ./data:/app/data
+      - ./etc-wireguard:/etc/wireguard
+    restart: unless-stopped

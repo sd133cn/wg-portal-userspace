@@ -1,0 +1,101 @@
+package auth
+
+import (
+	"slices"
+	"strings"
+
+	"github.com/h44z/wg-portal/internal"
+	"github.com/h44z/wg-portal/internal/config"
+	"github.com/h44z/wg-portal/internal/domain"
+)
+
+// parseOauthUserInfo parses the raw user info from the oauth provider and maps it to the internal user info struct
+func parseOauthUserInfo(
+	mapping config.OauthFields,
+	adminMapping *config.OauthAdminMapping,
+	raw map[string]any,
+	providerType string,
+	providerName string,
+) (*domain.AuthenticatorUserInfo, error) {
+	var isAdmin bool
+	var adminInfoAvailable bool
+	userGroups := internal.MapDefaultStringSlice(raw, mapping.UserGroups, nil)
+
+	// first try to match the is_admin field against the given regex
+	if mapping.IsAdmin != "" {
+		adminInfoAvailable = true
+		re := adminMapping.GetAdminValueRegex()
+		if re.MatchString(strings.TrimSpace(internal.MapDefaultString(raw, mapping.IsAdmin, ""))) {
+			isAdmin = true
+		}
+	}
+
+	userInfo := &domain.AuthenticatorUserInfo{
+		Identifier:         domain.UserIdentifier(internal.MapDefaultString(raw, mapping.UserIdentifier, "")),
+		Email:              internal.MapDefaultString(raw, mapping.Email, ""),
+		UserGroups:         userGroups,
+		Firstname:          internal.MapDefaultString(raw, mapping.Firstname, ""),
+		Lastname:           internal.MapDefaultString(raw, mapping.Lastname, ""),
+		Phone:              internal.MapDefaultString(raw, mapping.Phone, ""),
+		Department:         internal.MapDefaultString(raw, mapping.Department, ""),
+		IsAdmin:            isAdmin,
+		AdminInfoAvailable: adminInfoAvailable,
+	}
+
+	if err := userInfo.Sanitize(providerType, providerName); err != nil {
+		return nil, err
+	}
+
+	// check admin group match after sanitization
+	if !isAdmin && mapping.UserGroups != "" && adminMapping.AdminGroupRegex != "" {
+		adminInfoAvailable = true
+		re := adminMapping.GetAdminGroupRegex()
+		if slices.ContainsFunc(userInfo.UserGroups, re.MatchString) {
+			isAdmin = true
+		}
+		userInfo.IsAdmin = isAdmin
+		userInfo.AdminInfoAvailable = adminInfoAvailable
+	}
+
+	return userInfo, nil
+}
+
+// getOauthFieldMapping returns the default field mapping for the oauth provider
+func getOauthFieldMapping(f config.OauthFields) config.OauthFields {
+	defaultMap := config.OauthFields{
+		UserIdentifier: "sub",
+		Email:          "email",
+		Firstname:      "given_name",
+		Lastname:       "family_name",
+		Phone:          "phone",
+		Department:     "department",
+		IsAdmin:        "admin_flag",
+		UserGroups:     "", // by default, do not use user groups
+	}
+	if f.UserIdentifier != "" {
+		defaultMap.UserIdentifier = f.UserIdentifier
+	}
+	if f.Email != "" {
+		defaultMap.Email = f.Email
+	}
+	if f.Firstname != "" {
+		defaultMap.Firstname = f.Firstname
+	}
+	if f.Lastname != "" {
+		defaultMap.Lastname = f.Lastname
+	}
+	if f.Phone != "" {
+		defaultMap.Phone = f.Phone
+	}
+	if f.Department != "" {
+		defaultMap.Department = f.Department
+	}
+	if f.IsAdmin != "" {
+		defaultMap.IsAdmin = f.IsAdmin
+	}
+	if f.UserGroups != "" {
+		defaultMap.UserGroups = f.UserGroups
+	}
+
+	return defaultMap
+}

@@ -1,0 +1,37 @@
+import { fileURLToPath, URL } from 'url'
+
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+// https://vitejs.dev/config/
+export default defineConfig({
+  base: './',
+  plugins: [vue()],
+  resolve: {
+    alias: {
+      '@': fileURLToPath(new URL('./src', import.meta.url))
+    },
+    dedupe: ['prismjs']
+  },
+  build: {
+    //
+    outDir: process.env.DIST_OUT_DIR || '../internal/app/api/core/frontend-dist',
+    emptyOutDir: true
+  },
+  // local dev api (proxy to avoid cors problems)
+  server: {
+    port: 5000,
+    proxy: {
+      "/api/v0": {
+        target: "http://localhost:8888",
+        changeOrigin: true,
+        secure: false,
+        withCredentials: true,
+        headers: {
+          "x-wg-dev": true,
+        },
+        rewrite: (path) => path,
+      },
+    },
+  },
+})

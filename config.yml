@@ -1,0 +1,43 @@
+# wg-portal configuration
+#
+# All values below work out of the box for a fresh instance. Each field can
+# also be set via environment variables: WG_PORTAL_<SECTION>_<FIELD>
+# (e.g. WG_PORTAL_CORE_ADMIN_PASSWORD, WG_PORTAL_WEB_EXTERNAL_URL).
+# See ./portal/internal/config/config.go for the full list.
+
+core:
+  # Default admin account, created automatically on first startup if it does
+  # not exist yet. Change the password to something of your own:
+  admin_user: admin
+  admin_password: ""          # empty = built-in default "wgportal-default"
+  # create a WireGuard peer automatically for newly created users:
+  create_default_peer_on_user_creation: false
+
+web:
+  # The URL the browser uses to reach the portal API. Set it to the address
+  # you open in your browser (e.g. http://<server-ip>:8888). Leaving it empty
+  # makes the frontend use the page's own origin.
+  external_url: ""
+  # Secrets used for session/CSRF cookies. Leave empty to let wg-portal
+  # generate and persist them in the database on first run.
+  csrf_secret: ""
+  session_secret: ""
+
+advanced:
+  # UDP port the tunnel server listens on:
+  start_listen_port: 51820
+  # Address pool handed out to tunnel clients (10.11.12.0/24 upstream default):
+  start_cidr_v4: 10.11.12.0/24
+  # Where wg-portal writes the wg-quick-format tunnel config files.
+  # Keep /etc/wireguard: it is the volume shared with the backend container,
+  # which watches this directory and (re)applies the tunnels.
+  # (Set empty to disable file export.)
+  config_storage_path: /etc/wireguard
+  log_level: info
+
+auth:
+  # WebAuthn passkeys require the portal to be reachable by DOMAIN (the RPID
+  # must be a hostname, not an IP address). If you access the portal by IP,
+  # keep this disabled or set web.external_url to a real domain.
+  webauthn:
+    enabled: false

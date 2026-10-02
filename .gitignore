@@ -1,0 +1,24 @@
+# runtime state - NEVER commit: SQLite holds all tunnel private keys
+data/*
+!data/.gitkeep
+etc-wireguard/*
+!etc-wireguard/.gitkeep
+
+# secrets / credentials
+*.pem
+*.key
+id_ed25519*
+credentials*.txt
+login.json
+
+# build artifacts
+portal/wg-portal-*
+*.tar
+*.tgz
+frontend/node_modules/
+portal/frontend/node_modules/
+
+# local machine files
+.DS_Store
+Thumbs.db
+*.log
