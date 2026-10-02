@@ -28,6 +28,16 @@
 # Both empty (default) disables it. iptables state is lost on host reboot, so
 # the watchdog re-establishes the MASQUERADE/FORWARD rules at startup; rules
 # added by the host package manager (Docker's DOCKER chain) are never touched.
+# The iptables binary is PROBED, not assumed: Debian ships `iptables` as the
+# nf_tables build, which is unusable on kernels without nftables support
+# (rc=4 "table does not exist", seen on Synology DSM 4.4) — those boxes need
+# `iptables-legacy`. Without the probe NAT silently disappears.
+# Rule existence is also checked defensively (see rule_present): some DSM builds
+# answer "Bad rule (does a matching rule exist in that chain?)" for `-C` on
+# BUILT-IN chains even when the rule is there, which would append a duplicate
+# rule on every cycle - so the rule listing is used as a fallback.
+# Forwarding (net.ipv4.ip_forward=1) must be enabled on the host: a container
+# normally cannot write /proc/sys, so the watchdog only warns when it is off.
 #
 set -u
 
@@ -42,6 +52,16 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 log() { echo "[wg-watch $(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
+# Pick a WORKING iptables binary (cached in $IPT after the first call).
+IPT=""
+pick_iptables() {
+    [ -n "$IPT" ] && return 0
+    for cand in iptables iptables-legacy; do
+        if have "$cand" && "$cand" -L -n >/dev/null 2>&1; then IPT="$cand"; return 0; fi
+    done
+    return 1
+}
+
 nat_mode="off"
 [ -n "$NAT_CIDR" ] && [ -n "$NAT_IFACE" ] && nat_mode="on ($NAT_CIDR -> $NAT_IFACE, chain $NAT_CHAIN)"
 
@@ -50,26 +70,57 @@ log "wireguard-quick: $(have wg-quick && command -v wg-quick || echo 'NOT INSTAL
 log "kernel module:   $(ip link add dev __wg_probe__ type wireguard 2>/dev/null && { ip link del dev __wg_probe__; echo 'AVAILABLE (kernel mode)'; } || echo 'NOT AVAILABLE (userspace fallback will be used)')"
 log "config dir:      $CONF_DIR (shared with wg-portal)"
 log "nat self-heal:   $nat_mode"
-
-[ -n "$NAT_IFACE" ] && [ -n "$NAT_CIDR" ] || true
+pick_iptables && log "iptables:        $IPT ($($IPT --version 2>&1 | head -1))" \
+    || log "iptables:        NONE USABLE (nf_tables and legacy both fail; NAT unavailable)"
 if ! have wg-quick; then log "FATAL: wg-quick not found"; exit 1; fi
 mkdir -p "$STATE_DIR"
 
 # ---------------------------------------------------------------- NAT setup --
+# Is this exact rule already in <table>/<chain>? `-C` is the fast path, but some
+# patched kernels/iptables builds answer "Bad rule (does a matching rule exist
+# in that chain?)" for built-in chains even when the rule IS there (seen on
+# Synology DSM's own iptables 1.8.3) - blindly trusting that would append a
+# duplicate rule on every cycle. So fall back to grepping the rule listing.
+rule_present() {
+    t="$1"; c="$2"; shift 2
+    "$IPT" -t "$t" -C "$c" "$@" >/dev/null 2>&1 && return 0
+    "$IPT" -t "$t" -S "$c" 2>/dev/null | grep -qF -- "-A $c $*" && return 0
+    "$IPT" -t "$t" -S 2>/dev/null | grep -qF -- "-A $c $*"
+}
+
 ensure_nat() {
     [ "$nat_mode" = "off" ] && return 0
-    have iptables || { log "warn: iptables not installed, skipping NAT"; return 0; }
+    pick_iptables || { log "warn: no usable iptables binary, skipping NAT"; return 0; }
     ip link show "$NAT_IFACE" >/dev/null 2>&1 || { log "warn: interface $NAT_IFACE not up yet"; return 1; }
-    sysctl -q -w net.ipv4.ip_forward=1
-    # dedicated user chain so our rules coexist with the host's (e.g. Docker's)
-    if ! iptables -t nat -n | grep -q "^Chain $NAT_CHAIN"; then
-        iptables -t nat -N "$NAT_CHAIN" 2>/dev/null
-        iptables -t nat -C POSTROUTING -j "$NAT_CHAIN" 2>/dev/null || iptables -t nat -A POSTROUTING -j "$NAT_CHAIN"
+    # NAT needs forwarding on the HOST. Inside a plain (non-privileged) container
+    # /proc/sys is usually read-only, so this is best-effort: only complain when
+    # forwarding is really off and could not be enabled from here.
+    if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" != "1" ]; then
+        if [ -w /proc/sys/net/ipv4/ip_forward ]; then
+            echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
+        elif have sysctl; then
+            sysctl -q -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+        fi
+        [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" = "1" ] \
+            || log "warn: ip_forward is not 1 and cannot be set from here (enable it on the host)"
     fi
-    iptables -t nat -C "$NAT_CHAIN" -s "$NAT_CIDR" -o "$NAT_IFACE" -j MASQUERADE 2>/dev/null \
-        || iptables -t nat -A "$NAT_CHAIN" -s "$NAT_CIDR" -o "$NAT_IFACE" -j MASQUERADE
-    iptables -C FORWARD -s "$NAT_CIDR" -j ACCEPT 2>/dev/null || iptables -I FORWARD -s "$NAT_CIDR" -j ACCEPT
-    log "nat: MASQUERADE $NAT_CIDR -> $NAT_IFACE ensured (chain $NAT_CHAIN)"
+    changed=""
+    # dedicated user chain so our rules coexist with the host's (e.g. Docker's).
+    # The jump is checked separately from the chain: `iptables -F` removes rules
+    # but keeps chains, so an existing-but-empty chain must still be re-hooked.
+    if ! "$IPT" -t nat -S "$NAT_CHAIN" >/dev/null 2>&1; then
+        "$IPT" -t nat -N "$NAT_CHAIN" 2>/dev/null && changed=1
+    fi
+    rule_present nat POSTROUTING -j "$NAT_CHAIN" \
+        || { "$IPT" -t nat -A POSTROUTING -j "$NAT_CHAIN" && changed=1; }
+    rule_present nat "$NAT_CHAIN" -s "$NAT_CIDR" -o "$NAT_IFACE" -j MASQUERADE \
+        || { "$IPT" -t nat -A "$NAT_CHAIN" -s "$NAT_CIDR" -o "$NAT_IFACE" -j MASQUERADE && changed=1; }
+    rule_present filter FORWARD -s "$NAT_CIDR" -j ACCEPT \
+        || { "$IPT" -I FORWARD -s "$NAT_CIDR" -j ACCEPT && changed=1; }
+    # only talk about it when something actually had to be (re)established -
+    # this runs on a timer, so logging unconditionally would flood the log
+    [ -n "$changed" ] && log "nat: MASQUERADE $NAT_CIDR -> $NAT_IFACE ensured via $IPT (chain $NAT_CHAIN)"
+    return 0
 }
 
 # -------------------------------------------------------------- clean slate --
@@ -110,8 +161,10 @@ start_iface() {
 
     clean_slate "$ifname"
 
-    if ! wg-quick up "$ifname" 2>"$STATE_DIR/$ifname.err" \
-       && ! wg-quick down "$ifname" 2>/dev/null; then
+    # NOTE: the config PATH is passed to wg-quick (not just the interface name),
+    # so CONF_DIR is honoured instead of wg-quick's hardcoded /etc/wireguard.
+    if ! wg-quick up "$conf" 2>"$STATE_DIR/$ifname.err" \
+       && ! wg-quick down "$conf" 2>/dev/null; then
         log "$ifname: initial wg-quick apply failed: $(tail -n 2 "$STATE_DIR/$ifname.err" 2>/dev/null | tr '\n' ' ')"
     fi
     # userspace fallback: daemon is spawned detached by wg-quick and binds its
@@ -129,8 +182,12 @@ start_iface() {
     # VERIFY: a "mute" daemon answers on an ephemeral port with zero peers.
     reported=$(wg show "$ifname" 2>/dev/null | grep 'listening port' | awk '{print $3}')
     [ "$reported" = "$wantport" ] || { log "$ifname: REAPPLY (daemon on port ${reported:-none}, want $wantport)"; wg setconf "$ifname" "$rawconf"; sleep 1; reported=$(wg show "$ifname" 2>/dev/null | grep 'listening port' | awk '{print $3}'); [ "$reported" = "$wantport" ] || { log "$ifname: daemon still on wrong port, next cycle"; return 1; }; }
-    peers=$(wg show "$ifname" peers 2>/dev/null | grep -c 'public key' || true)
+    # NOTE: `wg show <if> peers` prints bare public keys, one per line - grepping
+    # for the words "public key" (which only `wg show <if>` prints) yields 0.
+    peers=$(wg show "$ifname" peers 2>/dev/null | grep -c . || true)
+    wantpeers=$(grep -c '^\[Peer\]' "$conf" 2>/dev/null || true)
     log "$ifname: UP and verified (listening port $reported, $peers peer(s))"
+    [ "$peers" = "$wantpeers" ] || log "$ifname: WARN $peers peer(s) active, config declares $wantpeers"
     return 0
 }
 
@@ -139,10 +196,14 @@ ensure_nat || true
 log "watching $CONF_DIR every ${INTERVAL}s (state in $STATE_DIR)"
 
 prev_md5s=""
+# NAT state can be flushed by host reboots/package upgrades: re-check every 60s.
+# Do NOT use $SECONDS for this: on Debian /bin/sh is dash, where SECONDS is not a
+# special variable, so the maths silently collapses to "every single cycle".
+nat_ticks=$(( 60 / INTERVAL )); [ "$nat_ticks" -lt 1 ] && nat_ticks=1
+tick=0
 while :; do
-    # NAT state can be flushed by host reboots/packages: re-ensure every 60s
-    every=$(( (SECONDS / 60) + 1 ))
-    [ $every -eq 1 ] && ensure_nat || true
+    tick=$(( tick + 1 ))
+    [ $(( tick % nat_ticks )) -eq 0 ] && ensure_nat || true
 
     for conf in "$CONF_DIR"/*.conf; do
         [ -e "$conf" ] || continue
