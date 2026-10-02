@@ -43,7 +43,7 @@
 > 首次构建需要联网：`portal` 镜像会 `npm ci`（前端）+ `go mod download`（后端依赖），`backend` 镜像会 `apt-get install wireguard-go wireguard-tools …`。**不能联网的机器不要用这一节**，直接用「离线部署（预构建镜像）」里的镜像 tar，跳过 build。
 
 ```bash
-git clone <your-repo-url> && cd wg-portal-userspace
+git clone https://github.com/sd133cn/wg-portal-userspace.git && cd wg-portal-userspace
 
 # 1) 按需改 config.yml：
 #    - core.admin_password  建议设置自己的密码（留空=内置默认密码）
