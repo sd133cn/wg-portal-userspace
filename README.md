@@ -22,7 +22,8 @@
 ├── config.yml                  # wg-portal 配置（首启 admin 账号、端口、网段、共享目录）
 ├── backend/                    # 数据面：Dockerfile + wg-watch.sh 看门狗
 ├── portal/                     # 控制面：wg-portal 源码（含 userspace 补丁 + 完整前端构建）
-├── scripts/                    # 维护者脚本（构建并导出离线镜像 tar）
+│   └── UPSTREAM.md             # 上游来源 pin（commit）+ 与上游差异的逐文件核对证据
+├── scripts/                    # 维护者脚本：导出离线镜像 tar、上游漂移检测
 ├── data/                       # 运行时生成：SQLite（用户/密钥/peer），勿提交
 └── etc-wireguard/              # 运行时生成：隧道 .conf（portal 写、backend 读），勿提交
 ```
@@ -34,7 +35,16 @@
 
 1. `internal/adapters/wgcontroller/local.go`（源码内以 `[userspace-fork]` 注释标记）：`LinkAdd`/`LinkDel` 失败（模块缺失）不再回滚整个保存事务——内核操作是"锦上添花"，配置落盘与隧道（由 backend 拉起）才是主体；
 2. 前端按上游流程完整构建（vite），避免打包进镜像的前端资产残缺导致控制台 404/TypeError；
-3. 其余逻辑与上游一致，欢迎以后游更新为基础 rebase。
+3. 其余逻辑与上游一致，欢迎以上游更新为基础 rebase。
+
+**上游版本（pin）**：`portal/` 钉在上游 commit **`eb44c8c4ff120f34c26b2415c47560f4fba0603c`**（`master`，2026-09-13）。上游最新 Release 是 `v2.3.1`（2026-06-12），本快照取自比它更新的 `master`，所以没有 tag 可引用，只能钉 commit。逐文件核对结果：除上面第 1 条那一处补丁外，`portal/` 与上游该 commit **逐字节一致**；另有 78 个非构建文件（上游 CI、Helm chart、文档站、开发容器等）**有意未收录** —— 详见 [`portal/UPSTREAM.md`](portal/UPSTREAM.md)。
+
+随时可以复验，或看上游有没有新提交：
+
+```bash
+sh scripts/check-upstream.sh            # 与钉住的 commit 比对（预期只见 local.go 一处补丁差异）
+sh scripts/check-upstream.sh master     # 与上游最新 master 比对，判断是否需要 rebase
+```
 
 ## 快速开始
 
@@ -133,5 +143,5 @@ tar czf state.tar.gz data etc-wireguard config.yml
 
 ## 致谢 / 上游
 
-- [h44z/wg-portal](https://github.com/h44z/wg-portal) —— 本项目的基础（MIT）
+- [h44z/wg-portal](https://github.com/h44z/wg-portal) —— 本项目的基础（MIT）；本仓库 `portal/` 对应上游 commit [`eb44c8c4ff`](https://github.com/h44z/wg-portal/commit/eb44c8c4ff120f34c26b2415c47560f4fba0603c)（2026-09-13，详见 [`portal/UPSTREAM.md`](portal/UPSTREAM.md)）
 - [wireguard](https://www.wireguard.com/) 及其 Go 实现

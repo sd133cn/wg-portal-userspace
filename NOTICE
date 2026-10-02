@@ -7,7 +7,10 @@ Licensed under the MIT License.
 
 The upstream source is bundled in the portal/ directory, and the original
 upstream license text is kept verbatim in portal/LICENSE.txt, as its terms
-require.
+require. The bundled copy corresponds to upstream commit
+eb44c8c4ff120f34c26b2415c47560f4fba0603c (branch master, 2026-09-13);
+portal/UPSTREAM.md records the file-by-file verification of exactly what was
+taken from upstream, what was modified, and what was intentionally left out.
 
 Modifications by sd133cn (2026):
 

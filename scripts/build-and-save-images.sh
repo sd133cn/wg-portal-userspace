@@ -18,11 +18,22 @@ OUT_DIR="${OUT_DIR:-dist}"
 cd "$(dirname "$0")/.."
 mkdir -p "$OUT_DIR"
 
-echo "==> building wg-backend:$VERSION"
-docker build -t "wg-backend:$VERSION" ./backend
+# 上游 pin：README 说本仓库 portal/ 是上游 wg-portal 的快照，这里把来源信息
+# 打成 OCI 标签，使用者 `docker inspect` 就能看到（不修改上游 Dockerfile）。
+UPSTREAM_REF="$(sed -n 's/^upstream_ref:[[:space:]]*//p' portal/UPSTREAM.md 2>/dev/null | head -1)"
+[ -n "$UPSTREAM_REF" ] || { echo "警告：portal/UPSTREAM.md 里读不到 upstream_ref，revision 标签将为空" >&2; UPSTREAM_REF="unknown"; }
+SRC_URL="${SOURCE_URL:-https://github.com/sd133cn/wg-portal-userspace}"
+LABELS="--label org.opencontainers.image.title=wg-portal-userspace --label org.opencontainers.image.version=$VERSION --label org.opencontainers.image.source=$SRC_URL"
 
-echo "==> building wg-portal:$VERSION"
-docker build -t "wg-portal:$VERSION" --build-arg "BUILD_VERSION=$VERSION" ./portal
+echo "==> building wg-backend:$VERSION"
+# shellcheck disable=SC2086
+docker build -t "wg-backend:$VERSION" $LABELS ./backend
+
+echo "==> building wg-portal:$VERSION (upstream $UPSTREAM_REF)"
+# shellcheck disable=SC2086
+docker build -t "wg-portal:$VERSION" $LABELS \
+  --label "org.opencontainers.image.revision=$UPSTREAM_REF" \
+  --build-arg "BUILD_VERSION=$VERSION" ./portal
 
 TAR="$OUT_DIR/wg-portal-userspace-images-v$VERSION.tar.gz"
 echo "==> saving to $TAR"
