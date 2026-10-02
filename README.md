@@ -129,7 +129,7 @@ tar czf state.tar.gz data etc-wireguard config.yml
 
 - `data/` 内含全部隧道私钥，`etc-wireguard/` 内含服务端私钥：**永远不要**提交进 git 或随意拷贝（`.gitignore` 已排除）；
 - 面板监听 `0.0.0.0:8888`（容器用 host 网络）：**默认没有 TLS、也没有来源限制**，如要暴露到不可信网络，请自行加反向代理+TLS 或防火墙限制来源 IP；
-- 本仓库为 MIT 协议（根目录 `LICENSE`）；本项目是上游 wg-portal 的衍生作品，`portal/LICENSE.txt` 保留原作者 Christoph Haas 的版权信息。
+- 本仓库为 MIT 协议（根目录 `LICENSE`）；本项目是上游 wg-portal 的衍生作品，`NOTICE` 与 `portal/LICENSE.txt` 保留原作者 Christoph Haas 的版权信息。
 
 ## 致谢 / 上游
 

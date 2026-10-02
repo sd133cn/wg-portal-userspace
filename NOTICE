@@ -1,0 +1,18 @@
+NOTICE
+
+This project (wg-portal-userspace) is a derivative work of WireGuard Portal V2
+<https://github.com/h44z/wg-portal>
+Copyright (c) 2020-2025 Christoph Haas
+Licensed under the MIT License.
+
+The upstream source is bundled in the portal/ directory, and the original
+upstream license text is kept verbatim in portal/LICENSE.txt, as its terms
+require.
+
+Modifications by sd133cn (2026):
+
+- a userspace WireGuard backend (wireguard-go) with a self-healing watchdog,
+  so the stack also runs on hosts whose kernel has no WireGuard module
+  (verified on Synology DSM with kernel 4.4.302+);
+- an offline deployment path: prebuilt images plus
+  docker-compose.release.yml, for machines with no outbound internet access.
